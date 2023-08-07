@@ -1021,8 +1021,13 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(controlnet):
+
+                # set the random seed for the batch
+                random_seed = torch.randint(0, 2**32 - 1, (1,)).item()  # generate random seed from 0 to 2^32 - 1
+                generator = torch.Generator().manual_seed(random_seed) # create generator from seed
+
                 # Convert images to latent space
-                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample(generator=generator)
                 latents = latents * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
@@ -1040,11 +1045,11 @@ def main(args):
                 # if we're using input images, we need to do the same for them            
                 if "input_pixel_values" in batch:
                     # Convert input images to latent space
-                    input_latents = vae.encode(batch["input_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    input_latents = vae.encode(batch["input_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample(generator=generator)
                     input_latents = input_latents * vae.config.scaling_factor
                     
                     # Sample noise that we'll add to the input latents
-                    input_noisy_latents = torch.randn_like(input_latents)
+                    input_noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
                     # input_bsz = input_latents.shape[0]
 
                 # Get the text embedding for conditioning
