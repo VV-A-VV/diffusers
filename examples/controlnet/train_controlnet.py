@@ -464,6 +464,9 @@ def parse_args(input_args=None):
         "--image_column", type=str, default="image", help="The column of the dataset containing the target image."
     )
     parser.add_argument(
+        "--input_image_column", type=str, default="input_image", help="The column of the dataset containing the input image."  
+    )
+    parser.add_argument(
         "--conditioning_image_column",
         type=str,
         default="conditioning_image",
@@ -615,7 +618,17 @@ def make_train_dataset(args, tokenizer, accelerator):
             raise ValueError(
                 f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
             )
-
+    
+    if args.input_image_column is None:
+        has_input_image_column = False
+    else:
+        has_input_image_column = True
+        input_image_column = args.input_image_column
+        if input_image_column not in column_names:
+            raise ValueError(
+                f"`--input_image_column` value '{args.input_image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
+            )
+        
     if args.caption_column is None:
         caption_column = column_names[1]
         logger.info(f"caption column defaulting to {caption_column}")
@@ -679,9 +692,14 @@ def make_train_dataset(args, tokenizer, accelerator):
         conditioning_images = [image.convert("RGB") for image in examples[conditioning_image_column]]
         conditioning_images = [conditioning_image_transforms(image) for image in conditioning_images]
 
+        if has_input_image_column:
+            input_images = [image.convert("RGB") for image in examples[input_image_column]]
+            input_images = [image_transforms(image) for image in input_images]
+            examples["input_pixel_values"] = input_images
+
         examples["pixel_values"] = images
         examples["conditioning_pixel_values"] = conditioning_images
-        examples["input_ids"] = tokenize_captions(examples)
+        examples["input_ids"] = tokenize_captions(examples)            
 
         return examples
 
@@ -702,6 +720,17 @@ def collate_fn(examples):
     conditioning_pixel_values = conditioning_pixel_values.to(memory_format=torch.contiguous_format).float()
 
     input_ids = torch.stack([example["input_ids"] for example in examples])
+
+    if "input_pixel_values" in examples[0]:
+        input_pixel_values = torch.stack([example["input_pixel_values"] for example in examples])
+        input_pixel_values = input_pixel_values.to(memory_format=torch.contiguous_format).float()
+        return {
+            "pixel_values": pixel_values,
+            "conditioning_pixel_values": conditioning_pixel_values,
+            "input_pixel_values": input_pixel_values,
+            "input_ids": input_ids,
+        }
+
 
     return {
         "pixel_values": pixel_values,
@@ -998,7 +1027,8 @@ def main(args):
 
                 # Sample noise that we'll add to the latents
                 noise = torch.randn_like(latents)
-                bsz = latents.shape[0]
+                bsz = latents.shape[0]      
+
                 # Sample a random timestep for each image
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
@@ -1007,29 +1037,60 @@ def main(args):
                 # (this is the forward diffusion process)
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
+                # if we're using input images, we need to do the same for them            
+                if "input_pixel_values" in batch:
+                    # Convert input images to latent space
+                    input_latents = vae.encode(batch["input_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    input_latents = input_latents * vae.config.scaling_factor
+                    
+                    # Sample noise that we'll add to the input latents
+                    input_noisy_latents = torch.randn_like(input_latents)
+                    # input_bsz = input_latents.shape[0]
+
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
                 controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
 
-                down_block_res_samples, mid_block_res_sample = controlnet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    controlnet_cond=controlnet_image,
-                    return_dict=False,
-                )
+                #if we're using input images, we need to use input_noisy_latents instead of noisy_latents
+                if "input_pixel_values" in batch:
+                    down_block_res_samples, mid_block_res_sample = controlnet(
+                        input_noisy_latents,
+                        timesteps,
+                        encoder_hidden_states=encoder_hidden_states,
+                        controlnet_cond=controlnet_image,
+                        return_dict=False,
+                    )
+                else:
+                    down_block_res_samples, mid_block_res_sample = controlnet(
+                        noisy_latents,
+                        timesteps,
+                        encoder_hidden_states=encoder_hidden_states,
+                        controlnet_cond=controlnet_image,
+                        return_dict=False,
+                    )
 
                 # Predict the noise residual
-                model_pred = unet(
-                    noisy_latents,
-                    timesteps,
-                    encoder_hidden_states=encoder_hidden_states,
-                    down_block_additional_residuals=[
-                        sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                    ],
-                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
-                ).sample
+                if "input_pixel_values" in batch:
+                    model_pred = unet(
+                        input_noisy_latents,
+                        timesteps,
+                        encoder_hidden_states=encoder_hidden_states,
+                        down_block_additional_residuals=[
+                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                        ],
+                        mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
+                    ).sample
+                else:
+                    model_pred = unet(
+                        noisy_latents,
+                        timesteps,
+                        encoder_hidden_states=encoder_hidden_states,
+                        down_block_additional_residuals=[
+                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                        ],
+                        mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
+                    ).sample
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
