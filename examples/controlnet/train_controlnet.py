@@ -1025,7 +1025,7 @@ def main(args):
                 # set the random seed for the batch
                 random_seed = torch.randint(0, 2**32 - 1, (1,)).item()  # generate random seed from 0 to 2^32 - 1
                 generator = torch.Generator().manual_seed(random_seed) # create generator from seed
-                generator = generator.to(accelerator.device)
+                # generator = generator.to(accelerator.device)
                 # Convert images to latent space
                 latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample(generator=generator)
                 latents = latents * vae.config.scaling_factor

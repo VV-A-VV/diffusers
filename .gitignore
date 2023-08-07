@@ -174,3 +174,8 @@ tags
 .ruff_cache
 
 wandb
+
+examples/controlnet/miniset
+examples/controlnet/dataset.py
+examples/controlnet/run.bat
+examples/controlnet/experiment2
