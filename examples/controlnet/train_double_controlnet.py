@@ -805,7 +805,7 @@ def main(args):
 
     if args.controlnet_model_name_or_path:
         logger.info("Loading existing controlnet weights")
-        controlne1 = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        controlnet1 = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
         #donot train
         controlnet1.requires_grad_(False)
     else:
@@ -936,8 +936,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    controlnet2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet2, optimizer, train_dataloader, lr_scheduler
+    controlnet2, controlnet1, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        controlnet2, controlnet1, optimizer, train_dataloader, lr_scheduler
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -1026,11 +1026,11 @@ def main(args):
             with accelerator.accumulate(controlnet2):
 
                 # set the random seed for the batch
-                random_seed = torch.randint(0, 2**32 - 1, (1,)).item()  # generate random seed from 0 to 2^32 - 1
-                generator = torch.Generator().manual_seed(random_seed) # create generator from seed
+                # random_seed = torch.randint(0, 2**32 - 1, (1,)).item()  # generate random seed from 0 to 2^32 - 1
+                # generator = torch.Generator().manual_seed(random_seed) # create generator from seed
                 # generator = generator.to(accelerator.device)
                 # Convert images to latent space
-                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample(generator=generator)
+                latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
 
                 # Sample noise that we'll add to the latents
