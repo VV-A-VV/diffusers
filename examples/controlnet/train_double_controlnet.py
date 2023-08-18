@@ -805,11 +805,14 @@ def main(args):
 
     if args.controlnet_model_name_or_path:
         logger.info("Loading existing controlnet weights")
-        controlnet = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        controlne1 = ControlNetModel.from_pretrained(args.controlnet_model_name_or_path)
+        #donot train
+        controlnet1.requires_grad_(False)
     else:
         logger.info("Initializing controlnet weights from unet")
-        controlnet = ControlNetModel.from_unet(unet)
-
+        controlnet1 = ControlNetModel.from_unet(unet)
+        controlnet1.requires_grad_(False)
+    controlnet2 = ControlNetModel.from_unet(unet)
     # `accelerate` 0.16.0 will have better support for customized saving
     if version.parse(accelerate.__version__) >= version.parse("0.16.0"):
         # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
@@ -843,7 +846,7 @@ def main(args):
     vae.requires_grad_(False)
     unet.requires_grad_(False)
     text_encoder.requires_grad_(False)
-    controlnet.train()
+    controlnet2.train()
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -855,12 +858,12 @@ def main(args):
                     "xFormers 0.0.16 cannot be used for training in some GPUs. If you observe problems during training, please update xFormers to at least 0.0.17. See https://huggingface.co/docs/diffusers/main/en/optimization/xformers for more details."
                 )
             unet.enable_xformers_memory_efficient_attention()
-            controlnet.enable_xformers_memory_efficient_attention()
+            controlnet2.enable_xformers_memory_efficient_attention()
         else:
             raise ValueError("xformers is not available. Make sure it is installed correctly")
 
     if args.gradient_checkpointing:
-        controlnet.enable_gradient_checkpointing()
+        controlnet2.enable_gradient_checkpointing()
 
     # Check that all trainable models are in full precision
     low_precision_error_string = (
@@ -868,9 +871,9 @@ def main(args):
         " doing mixed precision training, copy of the weights should still be float32."
     )
 
-    if accelerator.unwrap_model(controlnet).dtype != torch.float32:
+    if accelerator.unwrap_model(controlnet2).dtype != torch.float32:
         raise ValueError(
-            f"Controlnet loaded as datatype {accelerator.unwrap_model(controlnet).dtype}. {low_precision_error_string}"
+            f"Controlnet loaded as datatype {accelerator.unwrap_model(controlnet2).dtype}. {low_precision_error_string}"
         )
 
     # Enable TF32 for faster training on Ampere GPUs,
@@ -897,7 +900,7 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
     # Optimizer creation
-    params_to_optimize = controlnet.parameters()
+    params_to_optimize = controlnet2.parameters()
     optimizer = optimizer_class(
         params_to_optimize,
         lr=args.learning_rate,
@@ -933,8 +936,8 @@ def main(args):
     )
 
     # Prepare everything with our `accelerator`.
-    controlnet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        controlnet, optimizer, train_dataloader, lr_scheduler
+    controlnet2, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+        controlnet2, optimizer, train_dataloader, lr_scheduler
     )
 
     # For mixed precision training we cast the text_encoder and vae weights to half-precision
@@ -1020,7 +1023,7 @@ def main(args):
     image_logs = None
     for epoch in range(first_epoch, args.num_train_epochs):
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(controlnet):
+            with accelerator.accumulate(controlnet2):
 
                 # set the random seed for the batch
                 random_seed = torch.randint(0, 2**32 - 1, (1,)).item()  # generate random seed from 0 to 2^32 - 1
@@ -1043,59 +1046,67 @@ def main(args):
                 noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
                 # if we're using input images, we need to do the same for them            
-                if "input_pixel_values" in batch:
-                    # Convert input images to latent space
-                    input_latents = vae.encode(batch["input_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample(generator=generator)
-                    input_latents = input_latents * vae.config.scaling_factor
+                # if "input_pixel_values" in batch:
+                #     # Convert input images to latent space
+                #     input_latents = vae.encode(batch["input_pixel_values"].to(dtype=weight_dtype)).latent_dist.sample(generator=generator)
+                #     input_latents = input_latents * vae.config.scaling_factor
                     
-                    # Sample noise that we'll add to the input latents
-                    input_noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
-                    # input_bsz = input_latents.shape[0]
+                #     # Sample noise that we'll add to the input latents
+                #     input_noisy_latents = noise_scheduler.add_noise(input_latents, noise, timesteps)
+                #     # input_bsz = input_latents.shape[0]
 
                 # Get the text embedding for conditioning
                 encoder_hidden_states = text_encoder(batch["input_ids"])[0]
 
-                controlnet_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
-
+                controlnet1_image = batch["input_pixel_values"].to(dtype=weight_dtype)
+                controlnet2_image = batch["conditioning_pixel_values"].to(dtype=weight_dtype)
                 #if we're using input images, we need to use input_noisy_latents instead of noisy_latents
-                if "input_pixel_values" in batch:
-                    down_block_res_samples, mid_block_res_sample = controlnet(
-                        input_noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=encoder_hidden_states,
-                        controlnet_cond=controlnet_image,
-                        return_dict=False,
-                    )
-                else:
-                    down_block_res_samples, mid_block_res_sample = controlnet(
-                        noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=encoder_hidden_states,
-                        controlnet_cond=controlnet_image,
-                        return_dict=False,
-                    )
-
+                # if "input_pixel_values" in batch:
+                #     down_block_res_samples, mid_block_res_sample = controlnet(
+                #         input_noisy_latents,
+                #         timesteps,
+                #         encoder_hidden_states=encoder_hidden_states,
+                #         controlnet_cond=controlnet_image,
+                #         return_dict=False,
+                #     )
+                # else:
+                down_block_res_samples1, mid_block_res_sample1 = controlnet1(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=controlnet1_image,
+                    return_dict=False,
+                )
+                down_block_res_samples2, mid_block_res_sample2 = controlnet2(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    controlnet_cond=controlnet2_image,
+                    return_dict=False,
+                )
+                down_block_res_samples = [down_block_res_sample1 + down_block_res_sample2 for down_block_res_sample1, down_block_res_sample2 in zip(down_block_res_samples1, down_block_res_samples2)]
+                mid_block_res_sample = mid_block_res_sample1 + mid_block_res_sample2 
                 # Predict the noise residual
-                if "input_pixel_values" in batch:
-                    model_pred = unet(
-                        input_noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=encoder_hidden_states,
-                        down_block_additional_residuals=[
-                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                        ],
-                        mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
-                    ).sample
-                else:
-                    model_pred = unet(
-                        noisy_latents,
-                        timesteps,
-                        encoder_hidden_states=encoder_hidden_states,
-                        down_block_additional_residuals=[
-                            sample.to(dtype=weight_dtype) for sample in down_block_res_samples
-                        ],
-                        mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
-                    ).sample
+                # if "input_pixel_values" in batch:
+                #     model_pred = unet(
+                #         input_noisy_latents,
+                #         timesteps,
+                #         encoder_hidden_states=encoder_hidden_states,
+                #         down_block_additional_residuals=[
+                #             sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                #         ],
+                #         mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
+                #     ).sample
+                # else:
+                model_pred = unet(
+                    noisy_latents,
+                    timesteps,
+                    encoder_hidden_states=encoder_hidden_states,
+                    down_block_additional_residuals=[
+                        sample.to(dtype=weight_dtype) for sample in down_block_res_samples
+                    ],
+                    mid_block_additional_residual=mid_block_res_sample.to(dtype=weight_dtype),
+                ).sample
 
                 # Get the target for loss depending on the prediction type
                 if noise_scheduler.config.prediction_type == "epsilon":
@@ -1108,7 +1119,7 @@ def main(args):
 
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
-                    params_to_clip = controlnet.parameters()
+                    params_to_clip = controlnet2.parameters()
                     accelerator.clip_grad_norm_(params_to_clip, args.max_grad_norm)
                 optimizer.step()
                 lr_scheduler.step()
@@ -1151,7 +1162,7 @@ def main(args):
                             text_encoder,
                             tokenizer,
                             unet,
-                            controlnet,
+                            controlnet2,
                             args,
                             accelerator,
                             weight_dtype,
@@ -1168,8 +1179,8 @@ def main(args):
     # Create the pipeline using using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        controlnet = accelerator.unwrap_model(controlnet)
-        controlnet.save_pretrained(args.output_dir)
+        controlnet2 = accelerator.unwrap_model(controlnet2)
+        controlnet2.save_pretrained(args.output_dir)
 
         if args.push_to_hub:
             save_model_card(
